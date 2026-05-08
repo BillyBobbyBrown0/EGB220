@@ -1,0 +1,107 @@
+#include <Arduino.h>
+#include <Servo.h>
+
+Servo S1; // pan  (X)
+Servo S2; // tilt (Y)
+
+#define TL A0
+#define TR A1
+#define BL A2
+#define BR A3
+
+// Servo travel limits — stay within safe mechanical range
+const int X_MIN = 45, X_MAX = 135;
+const int Y_MIN = 45, Y_MAX = 135;
+
+// Tuning
+float Kp        = 0.08;   // increase if sluggish, decrease if oscillating
+float orbitGain = 0.25;   // search spiral strength when lost
+int   deadband  = 25;     // sensor noise floor — tune to your environment
+int   lostThreshold = 1500; // total ADC sum below this = no IR detected
+
+float posX = 90, posY = 90;
+
+// Orbit state
+float orbitAngle = 0;
+float orbitRadius = 0;
+const float orbitRadiusMax = 15.0;  // max degrees of search sweep
+const float orbitRadiusStep = 0.05; // spiral grows slowly
+
+void setup() {
+  Serial.begin(115200);
+
+  S1.attach(9);
+  S2.attach(10);
+
+  // Centre both axes before starting
+  S1.write(180 - (int)posX);
+  S2.write(180 - (int)posY);
+  delay(1000);
+
+  Serial.println("READY");
+}
+
+void loop() {
+  // ── Read sensors ──────────────────────────────────────
+  int tl = analogRead(TL);
+  int tr = analogRead(TR);
+  int bl = analogRead(BL);
+  int br = analogRead(BR);
+
+  int total = tl + tr + bl + br;
+  bool lost = (total < lostThreshold);
+
+  // ── Tracking mode ─────────────────────────────────────
+  if (!lost) {
+    orbitRadius = 0;      // reset search spiral on reacquisition
+    orbitAngle  = 0;
+
+    int left   = tl + bl;
+    int right  = tr + br;
+    int top    = tl + tr;
+    int bottom = bl + br;
+
+    int errorX = left  - right;
+    int errorY = top   - bottom;
+
+    if (abs(errorX) < deadband) errorX = 0;
+    if (abs(errorY) < deadband) errorY = 0;
+
+    // Normalise against total light level so bright/dim IR
+    // doesn't change response speed
+    float normX = errorX / (float)(total + 1);
+    float normY = errorY / (float)(total + 1);
+
+    posX += Kp * normX * 100;  // scale back up after normalise
+    posY += Kp * normY * 100;
+
+  // ── Search / lost mode ────────────────────────────────
+  } else {
+    // Expanding spiral search — covers the FOV systematically
+    orbitAngle  += 0.15;
+    orbitRadius  = constrain(orbitRadius + orbitRadiusStep,
+                             0, orbitRadiusMax);
+
+    posX = 90 + orbitRadius * cos(orbitAngle);
+    posY = 90 + orbitRadius * sin(orbitAngle);
+  }
+
+  // ── Clamp & write ─────────────────────────────────────
+  posX = constrain(posX, X_MIN, X_MAX);
+  posY = constrain(posY, Y_MIN, Y_MAX);
+
+  S1.write(180 - (int)posX);
+  S2.write(180 - (int)posY);
+
+  // ── Serial telemetry ──────────────────────────────────
+  Serial.print(lost ? "LOST" : "LOCK");
+  Serial.print(" | tl:"); Serial.print(tl);
+  Serial.print(" tr:");   Serial.print(tr);
+  Serial.print(" bl:");   Serial.print(bl);
+  Serial.print(" br:");   Serial.print(br);
+  Serial.print(" | sum:"); Serial.print(total);
+  Serial.print(" | X:");  Serial.print(posX);
+  Serial.print(" Y:");    Serial.println(posY);
+
+  delay(10);
+}
